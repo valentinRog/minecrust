@@ -1,6 +1,8 @@
 package main
 
+import "core:fmt"
 import "core:math/rand"
+import "core:mem"
 import rl "vendor:raylib"
 
 ATLAS_WIDTH :: 16
@@ -11,6 +13,7 @@ BlockType :: enum {
 	GRASS,
 	DIRT,
 	STONE,
+	AIR,
 }
 
 BlockTextureCoord :: struct {
@@ -20,7 +23,7 @@ BlockTextureCoord :: struct {
 }
 
 get_block_texture_coord :: proc(block_type: BlockType) -> BlockTextureCoord {
-	switch block_type {
+	#partial switch block_type {
 	case .GRASS:
 		return {top = {0, 0}, side = {3, 0}, bottom = {2, 0}}
 	case .DIRT:
@@ -40,7 +43,7 @@ Block :: struct {
 	p:         [3]i32,
 }
 
-CHUNK_WIDTH := 16
+CHUNK_WIDTH :: 16
 
 Chunk :: struct {
 	vertices:  [dynamic]f32,
@@ -48,6 +51,23 @@ Chunk :: struct {
 	colors:    [dynamic]u8,
 	indices:   [dynamic]u16,
 	p:         [2]i32,
+	blocks:    [dynamic]Block,
+}
+
+chunk_set_block :: proc(chunk: ^Chunk, p: [3]i32, block: Block) {
+	x := p[0]
+	y := p[1]
+	z := p[2]
+	i := x + CHUNK_WIDTH * z + CHUNK_WIDTH * CHUNK_WIDTH * y
+	delete_block(&chunk.blocks[i])
+	chunk.blocks[i] = block
+}
+
+chunk_get_block :: proc(chunk: ^Chunk, p: [3]i32) -> ^Block {
+	x := p[0]
+	y := p[1]
+	z := p[2]
+	return &chunk.blocks[x + CHUNK_WIDTH * z + CHUNK_WIDTH * CHUNK_WIDTH * y]
 }
 
 add_block_to_chunk :: proc(chunk: ^Chunk, block: Block) {
@@ -61,6 +81,32 @@ add_block_to_chunk :: proc(chunk: ^Chunk, block: Block) {
 }
 
 create_chunk_mesh :: proc(chunk: ^Chunk) -> rl.Mesh {
+	clear(&chunk.vertices)
+	clear(&chunk.colors)
+	clear(&chunk.texcoords)
+	clear(&chunk.indices)
+
+	for x in 0 ..< CHUNK_WIDTH {
+		for z in 0 ..< CHUNK_WIDTH {
+			for y in 0 ..< 10 {
+				vertex_offset := u16(len(chunk.vertices) / 3)
+				block := chunk_get_block(chunk, {i32(x), i32(y), i32(z)})
+				append(
+					&chunk.vertices,
+					..chunk_get_block(chunk, {i32(x), i32(y), i32(z)}).vertices[:],
+				)
+				append(&chunk.colors, ..chunk_get_block(chunk, {i32(x), i32(y), i32(z)}).colors[:])
+				append(
+					&chunk.texcoords,
+					..chunk_get_block(chunk, {i32(x), i32(y), i32(z)}).texcoords[:],
+				)
+				for i in block.indices {
+					append(&chunk.indices, i + vertex_offset)
+				}
+			}
+		}
+	}
+
 	mesh := rl.Mesh {
 		vertexCount   = i32(len(chunk.vertices) / 3),
 		triangleCount = i32(len(chunk.indices) / 3),
@@ -75,11 +121,39 @@ create_chunk_mesh :: proc(chunk: ^Chunk) -> rl.Mesh {
 
 
 create_chunk :: proc(p: [2]i32) -> Chunk {
-	return Chunk{p = p}
+	chunk := Chunk {
+		p = p,
+	}
+	for x in 0 ..< CHUNK_WIDTH {
+		for z in 0 ..< CHUNK_WIDTH {
+			for y in 0 ..< 10 {
+				append(&chunk.blocks, create_block({}, .AIR))
+			}
+		}
+	}
+	return chunk
 }
 
+chunk_populate :: proc(chunk: ^Chunk) {
+	for x in 0 ..< 16 {
+		for z in 0 ..< 16 {
+			y := rand.uint32() % 4
+			for y in 0 ..= y {
+				chunk_set_block(
+					chunk,
+					{i32(x), i32(y), i32(z)},
+					create_block({i32(x), i32(y), i32(z)}, .STONE),
+				)
+			}
+		}
+	}
+}
 
 create_block :: proc(p: [3]i32, block_type: BlockType) -> Block {
+	if block_type == .AIR {
+		return {type = .AIR}
+	}
+
 	vertices: [dynamic]f32
 	texcoords: [dynamic]f32
 	colors: [dynamic]u8
@@ -186,6 +260,9 @@ delete_chunk :: proc(chunk: ^Chunk) {
 	delete(chunk.texcoords)
 	delete(chunk.colors)
 	delete(chunk.indices)
+	for &block in chunk.blocks {
+		delete_block(&block)
+	}
 }
 
 main :: proc() {
@@ -206,29 +283,33 @@ main :: proc() {
 	rl.SetTextureFilter(texture, .POINT)
 	material := rl.LoadMaterialDefault()
 	material.maps[0].texture = texture
-	chunk := create_chunk({0, 0})
-	defer delete_chunk(&chunk)
-
-	for x in -10 ..= 10 {
-		for z in -10 ..= 10 {
-			y := rand.uint32() % 4
-			for y in 0 ..= y {
-				block := create_block({i32(x), i32(y), i32(z)}, .STONE)
-				add_block_to_chunk(&chunk, block)
-				delete_block(&block)
-			}
+	chunks: [dynamic]Chunk
+	for x in -5 ..< 5 {
+		for z in -5 ..< 5 {
+			append(&chunks, create_chunk({i32(x), i32(z)}))
+			chunk_populate(&chunks[len(chunks) - 1])
 		}
 	}
-
-	block := create_block({0, 1, 0}, .GRASS)
-	add_block_to_chunk(&chunk, block)
+	defer {
+		for &chunk in chunks {
+			delete_chunk(&chunk)
+		}
+	}
 
 	up := false
 	down := false
 
 	vertical_velocity: f32 = 5.0
-	mesh := create_chunk_mesh(&chunk)
-	defer rl.UnloadMesh(mesh)
+	meshs: [dynamic]rl.Mesh
+	for &chunk in chunks {
+		append(&meshs, create_chunk_mesh(&chunk))
+	}
+
+	defer {
+		for mesh in meshs {
+			rl.UnloadMesh(mesh)
+		}
+	}
 
 	for !rl.WindowShouldClose() {
 
@@ -264,16 +345,17 @@ main :: proc() {
 		rl.DrawGrid(10, 1)
 
 
-		chunk_pos := rl.Vector3 {
-			f32(chunk.p[0] * i32(CHUNK_WIDTH)),
-			f32(chunk.p[1] * i32(CHUNK_WIDTH)),
-			0,
+		for i in 0..<len(chunks) {
+			chunk_pos := rl.Vector3 {
+				f32(chunks[i].p[0] * i32(CHUNK_WIDTH)),
+				0,
+				f32(chunks[i].p[1] * i32(CHUNK_WIDTH)),
+			}
+			transform := rl.MatrixTranslate(chunk_pos.x, chunk_pos.y, chunk_pos.z)
+			rl.DrawMesh(meshs[i], material, transform)
 		}
-		transform := rl.MatrixTranslate(chunk_pos.x, chunk_pos.y, chunk_pos.z)
-		rl.DrawMesh(mesh, material, transform)
 
 		rl.EndMode3D()
 		rl.EndDrawing()
-
 	}
 }
