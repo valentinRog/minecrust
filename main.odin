@@ -1,8 +1,6 @@
 package main
 
-import "core:fmt"
-import "core:math/rand"
-import "core:mem"
+import "core:math/noise"
 import rl "vendor:raylib"
 
 ATLAS_WIDTH :: 16
@@ -54,6 +52,319 @@ Chunk :: struct {
 	blocks:    [dynamic]Block,
 }
 
+Face :: struct {
+	vertices:   [4 * 3]f32,
+	textcoords: [4 * 3]f32,
+	colors:     [4 * 4]u8,
+	indices:    [2 * 3]i32,
+}
+chunk_fill_geometry :: proc(chunk: ^Chunk) {
+	clear(&chunk.vertices)
+	clear(&chunk.texcoords)
+	clear(&chunk.colors)
+	clear(&chunk.indices)
+
+	EPSILON :: 0.0005
+
+	COLOR_TOP := []u8 {
+		255,
+		255,
+		255,
+		255,
+		255,
+		255,
+		255,
+		255,
+		255,
+		255,
+		255,
+		255,
+		255,
+		255,
+		255,
+		255,
+	}
+	COLOR_SIDE_Z := []u8 {
+		204,
+		204,
+		204,
+		255,
+		204,
+		204,
+		204,
+		255,
+		204,
+		204,
+		204,
+		255,
+		204,
+		204,
+		204,
+		255,
+	}
+	COLOR_SIDE_X := []u8 {
+		153,
+		153,
+		153,
+		255,
+		153,
+		153,
+		153,
+		255,
+		153,
+		153,
+		153,
+		255,
+		153,
+		153,
+		153,
+		255,
+	}
+	COLOR_BOTTOM := []u8 {
+		102,
+		102,
+		102,
+		255,
+		102,
+		102,
+		102,
+		255,
+		102,
+		102,
+		102,
+		255,
+		102,
+		102,
+		102,
+		255,
+	}
+
+	is_air :: proc(chunk: ^Chunk, pos: [3]i32) -> bool {
+		if pos.x < 0 || pos.x >= CHUNK_WIDTH || pos.z < 0 || pos.z >= CHUNK_WIDTH {
+			return true
+		}
+		if pos.y < 0 || pos.y >= 10 {
+			return true
+		}
+
+		block := chunk_get_block(chunk, pos)
+		return block.type == .AIR
+	}
+
+	quad_count := 0
+
+	for x in 0 ..< CHUNK_WIDTH {
+		for z in 0 ..< CHUNK_WIDTH {
+			for y in 0 ..< 10 {
+				block_pos := [3]i32{i32(x), i32(y), i32(z)}
+				block := chunk_get_block(chunk, block_pos)
+
+				if block.type == .AIR do continue
+
+				texture_coord := get_block_texture_coord(block.type)
+				fx, fy, fz := f32(x), f32(y), f32(z)
+
+				// --- FACE HAUT (Y + 1) ---
+				if is_air(chunk, {i32(x), i32(y) + 1, i32(z)}) {
+					u_min := f32(texture_coord.top[0]) / ATLAS_WIDTH + EPSILON
+					v_min := f32(texture_coord.top[1]) / ATLAS_WIDTH + EPSILON
+					u_max := f32(texture_coord.top[0] + 1) / ATLAS_WIDTH - EPSILON
+					v_max := f32(texture_coord.top[1] + 1) / ATLAS_WIDTH - EPSILON
+
+					append(
+						&chunk.vertices,
+						..[]f32 {
+							fx + 0,
+							fy + 1,
+							fz + 0,
+							fx + 0,
+							fy + 1,
+							fz + 1,
+							fx + 1,
+							fy + 1,
+							fz + 1,
+							fx + 1,
+							fy + 1,
+							fz + 0,
+						},
+					)
+					append(
+						&chunk.texcoords,
+						..[]f32{u_min, v_min, u_min, v_max, u_max, v_max, u_max, v_min},
+					)
+					append(&chunk.colors, ..COLOR_TOP)
+					quad_count += 1
+				}
+
+				// --- FACE NORD (Z - 1) ---
+				if is_air(chunk, {i32(x), i32(y), i32(z) - 1}) {
+					u_min := f32(texture_coord.side[0]) / ATLAS_WIDTH + EPSILON
+					v_min := f32(texture_coord.side[1]) / ATLAS_WIDTH + EPSILON
+					u_max := f32(texture_coord.side[0] + 1) / ATLAS_WIDTH - EPSILON
+					v_max := f32(texture_coord.side[1] + 1) / ATLAS_WIDTH - EPSILON
+
+					append(
+						&chunk.vertices,
+						..[]f32 {
+							fx + 0,
+							fy + 0,
+							fz + 0,
+							fx + 0,
+							fy + 1,
+							fz + 0,
+							fx + 1,
+							fy + 1,
+							fz + 0,
+							fx + 1,
+							fy + 0,
+							fz + 0,
+						},
+					)
+					append(
+						&chunk.texcoords,
+						..[]f32{u_max, v_max, u_max, v_min, u_min, v_min, u_min, v_max},
+					)
+					append(&chunk.colors, ..COLOR_SIDE_Z)
+					quad_count += 1
+				}
+
+				// --- FACE SUD (Z + 1) ---
+				if is_air(chunk, {i32(x), i32(y), i32(z) + 1}) {
+					u_min := f32(texture_coord.side[0]) / ATLAS_WIDTH + EPSILON
+					v_min := f32(texture_coord.side[1]) / ATLAS_WIDTH + EPSILON
+					u_max := f32(texture_coord.side[0] + 1) / ATLAS_WIDTH - EPSILON
+					v_max := f32(texture_coord.side[1] + 1) / ATLAS_WIDTH - EPSILON
+
+					append(
+						&chunk.vertices,
+						..[]f32 {
+							fx + 0,
+							fy + 0,
+							fz + 1,
+							fx + 1,
+							fy + 0,
+							fz + 1,
+							fx + 1,
+							fy + 1,
+							fz + 1,
+							fx + 0,
+							fy + 1,
+							fz + 1,
+						},
+					)
+					append(
+						&chunk.texcoords,
+						..[]f32{u_min, v_max, u_max, v_max, u_max, v_min, u_min, v_min},
+					)
+					append(&chunk.colors, ..COLOR_SIDE_Z)
+					quad_count += 1
+				}
+
+				// --- FACE OUEST (X - 1) ---
+				if is_air(chunk, {i32(x) - 1, i32(y), i32(z)}) {
+					u_min := f32(texture_coord.side[0]) / ATLAS_WIDTH + EPSILON
+					v_min := f32(texture_coord.side[1]) / ATLAS_WIDTH + EPSILON
+					u_max := f32(texture_coord.side[0] + 1) / ATLAS_WIDTH - EPSILON
+					v_max := f32(texture_coord.side[1] + 1) / ATLAS_WIDTH - EPSILON
+
+					append(
+						&chunk.vertices,
+						..[]f32 {
+							fx + 0,
+							fy + 0,
+							fz + 0,
+							fx + 0,
+							fy + 0,
+							fz + 1,
+							fx + 0,
+							fy + 1,
+							fz + 1,
+							fx + 0,
+							fy + 1,
+							fz + 0,
+						},
+					)
+					append(
+						&chunk.texcoords,
+						..[]f32{u_min, v_max, u_max, v_max, u_max, v_min, u_min, v_min},
+					)
+					append(&chunk.colors, ..COLOR_SIDE_X)
+					quad_count += 1
+				}
+
+				// --- FACE EST (X + 1) ---
+				if is_air(chunk, {i32(x) + 1, i32(y), i32(z)}) {
+					u_min := f32(texture_coord.side[0]) / ATLAS_WIDTH + EPSILON
+					v_min := f32(texture_coord.side[1]) / ATLAS_WIDTH + EPSILON
+					u_max := f32(texture_coord.side[0] + 1) / ATLAS_WIDTH - EPSILON
+					v_max := f32(texture_coord.side[1] + 1) / ATLAS_WIDTH - EPSILON
+
+					append(
+						&chunk.vertices,
+						..[]f32 {
+							fx + 1,
+							fy + 0,
+							fz + 0,
+							fx + 1,
+							fy + 1,
+							fz + 0,
+							fx + 1,
+							fy + 1,
+							fz + 1,
+							fx + 1,
+							fy + 0,
+							fz + 1,
+						},
+					)
+					append(
+						&chunk.texcoords,
+						..[]f32{u_max, v_max, u_max, v_min, u_min, v_min, u_min, v_max},
+					)
+					append(&chunk.colors, ..COLOR_SIDE_X)
+					quad_count += 1
+				}
+
+				// --- FACE BAS (Y - 1) ---
+				if is_air(chunk, {i32(x), i32(y) - 1, i32(z)}) {
+					u_min := f32(texture_coord.bottom[0]) / ATLAS_WIDTH + EPSILON
+					v_min := f32(texture_coord.bottom[1]) / ATLAS_WIDTH + EPSILON
+					u_max := f32(texture_coord.bottom[0] + 1) / ATLAS_WIDTH - EPSILON
+					v_max := f32(texture_coord.bottom[1] + 1) / ATLAS_WIDTH - EPSILON
+
+					append(
+						&chunk.vertices,
+						..[]f32 {
+							fx + 0,
+							fy + 0,
+							fz + 0,
+							fx + 1,
+							fy + 0,
+							fz + 0,
+							fx + 1,
+							fy + 0,
+							fz + 1,
+							fx + 0,
+							fy + 0,
+							fz + 1,
+						},
+					)
+					append(
+						&chunk.texcoords,
+						..[]f32{u_min, v_min, u_max, v_min, u_max, v_max, u_min, v_max},
+					)
+					append(&chunk.colors, ..COLOR_BOTTOM)
+					quad_count += 1
+				}
+			}
+		}
+	}
+
+	for i in 0 ..< quad_count {
+		v := u16(i * 4)
+		append(&chunk.indices, v + 0, v + 1, v + 2, v + 0, v + 2, v + 3)
+	}
+}
+
 chunk_set_block :: proc(chunk: ^Chunk, p: [3]i32, block: Block) {
 	x := p[0]
 	y := p[1]
@@ -81,32 +392,6 @@ add_block_to_chunk :: proc(chunk: ^Chunk, block: Block) {
 }
 
 create_chunk_mesh :: proc(chunk: ^Chunk) -> rl.Mesh {
-	clear(&chunk.vertices)
-	clear(&chunk.colors)
-	clear(&chunk.texcoords)
-	clear(&chunk.indices)
-
-	for x in 0 ..< CHUNK_WIDTH {
-		for z in 0 ..< CHUNK_WIDTH {
-			for y in 0 ..< 10 {
-				vertex_offset := u16(len(chunk.vertices) / 3)
-				block := chunk_get_block(chunk, {i32(x), i32(y), i32(z)})
-				append(
-					&chunk.vertices,
-					..chunk_get_block(chunk, {i32(x), i32(y), i32(z)}).vertices[:],
-				)
-				append(&chunk.colors, ..chunk_get_block(chunk, {i32(x), i32(y), i32(z)}).colors[:])
-				append(
-					&chunk.texcoords,
-					..chunk_get_block(chunk, {i32(x), i32(y), i32(z)}).texcoords[:],
-				)
-				for i in block.indices {
-					append(&chunk.indices, i + vertex_offset)
-				}
-			}
-		}
-	}
-
 	mesh := rl.Mesh {
 		vertexCount   = i32(len(chunk.vertices) / 3),
 		triangleCount = i32(len(chunk.indices) / 3),
@@ -137,7 +422,11 @@ create_chunk :: proc(p: [2]i32) -> Chunk {
 chunk_populate :: proc(chunk: ^Chunk) {
 	for x in 0 ..< 16 {
 		for z in 0 ..< 16 {
-			y := rand.uint32() % 4
+			frequency := 0.03
+			world_x := i32(x) + chunk.p[0] * CHUNK_WIDTH
+			world_z := i32(z) + chunk.p[1] * CHUNK_WIDTH
+			val_2d := noise.noise_2d(50, {f64(world_x) * frequency, f64(world_z) * frequency})
+			y := (val_2d + 1) * 0.5 * 9
 			for y in 0 ..= y {
 				chunk_set_block(
 					chunk,
@@ -288,6 +577,7 @@ main :: proc() {
 		for z in -5 ..< 5 {
 			append(&chunks, create_chunk({i32(x), i32(z)}))
 			chunk_populate(&chunks[len(chunks) - 1])
+			chunk_fill_geometry(&chunks[len(chunks) - 1])
 		}
 	}
 	defer {
@@ -345,7 +635,7 @@ main :: proc() {
 		rl.DrawGrid(10, 1)
 
 
-		for i in 0..<len(chunks) {
+		for i in 0 ..< len(chunks) {
 			chunk_pos := rl.Vector3 {
 				f32(chunks[i].p[0] * i32(CHUNK_WIDTH)),
 				0,
