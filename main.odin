@@ -32,15 +32,6 @@ get_block_texture_coord :: proc(block_type: BlockType) -> BlockTextureCoord {
 	unreachable()
 }
 
-Block :: struct {
-	type:      BlockType,
-	vertices:  [dynamic]f32,
-	texcoords: [dynamic]f32,
-	colors:    [dynamic]u8,
-	indices:   [dynamic]u16,
-	p:         [3]i32,
-}
-
 CHUNK_WIDTH :: 16
 
 Chunk :: struct {
@@ -49,7 +40,7 @@ Chunk :: struct {
 	colors:    [dynamic]u8,
 	indices:   [dynamic]u16,
 	p:         [2]i32,
-	blocks:    [dynamic]Block,
+	blocks:    [dynamic]BlockType,
 }
 
 Face :: struct {
@@ -147,8 +138,8 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 			return true
 		}
 
-		block := chunk_get_block(chunk, pos)
-		return block.type == .AIR
+		block_type := chunk_get_block(chunk, pos)
+		return block_type == .AIR
 	}
 
 	quad_count := 0
@@ -157,11 +148,11 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 		for z in 0 ..< CHUNK_WIDTH {
 			for y in 0 ..< 10 {
 				block_pos := [3]i32{i32(x), i32(y), i32(z)}
-				block := chunk_get_block(chunk, block_pos)
+				block_type := chunk_get_block(chunk, block_pos)
 
-				if block.type == .AIR do continue
+				if block_type == .AIR do continue
 
-				texture_coord := get_block_texture_coord(block.type)
+				texture_coord := get_block_texture_coord(block_type)
 				fx, fy, fz := f32(x), f32(y), f32(z)
 
 				// --- FACE HAUT (Y + 1) ---
@@ -365,30 +356,19 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 	}
 }
 
-chunk_set_block :: proc(chunk: ^Chunk, p: [3]i32, block: Block) {
+chunk_set_block :: proc(chunk: ^Chunk, p: [3]i32, block_type: BlockType) {
 	x := p[0]
 	y := p[1]
 	z := p[2]
 	i := x + CHUNK_WIDTH * z + CHUNK_WIDTH * CHUNK_WIDTH * y
-	delete_block(&chunk.blocks[i])
-	chunk.blocks[i] = block
+	chunk.blocks[i] = block_type
 }
 
-chunk_get_block :: proc(chunk: ^Chunk, p: [3]i32) -> ^Block {
+chunk_get_block :: proc(chunk: ^Chunk, p: [3]i32) -> BlockType {
 	x := p[0]
 	y := p[1]
 	z := p[2]
-	return &chunk.blocks[x + CHUNK_WIDTH * z + CHUNK_WIDTH * CHUNK_WIDTH * y]
-}
-
-add_block_to_chunk :: proc(chunk: ^Chunk, block: Block) {
-	vertex_offset := u16(len(chunk.vertices) / 3)
-	append(&chunk.vertices, ..block.vertices[:])
-	append(&chunk.colors, ..block.colors[:])
-	append(&chunk.texcoords, ..block.texcoords[:])
-	for i in block.indices {
-		append(&chunk.indices, i + vertex_offset)
-	}
+	return chunk.blocks[x + CHUNK_WIDTH * z + CHUNK_WIDTH * CHUNK_WIDTH * y]
 }
 
 create_chunk_mesh :: proc(chunk: ^Chunk) -> rl.Mesh {
@@ -412,7 +392,7 @@ create_chunk :: proc(p: [2]i32) -> Chunk {
 	for x in 0 ..< CHUNK_WIDTH {
 		for z in 0 ..< CHUNK_WIDTH {
 			for y in 0 ..< 10 {
-				append(&chunk.blocks, create_block({}, .AIR))
+				append(&chunk.blocks, BlockType.AIR)
 			}
 		}
 	}
@@ -431,127 +411,20 @@ chunk_populate :: proc(chunk: ^Chunk) {
 				chunk_set_block(
 					chunk,
 					{i32(x), i32(y), i32(z)},
-					create_block({i32(x), i32(y), i32(z)}, .STONE),
+					.STONE
 				)
 			}
 		}
 	}
 }
 
-create_block :: proc(p: [3]i32, block_type: BlockType) -> Block {
-	if block_type == .AIR {
-		return {type = .AIR}
-	}
-
-	vertices: [dynamic]f32
-	texcoords: [dynamic]f32
-	colors: [dynamic]u8
-	indices: [dynamic]u16
-
-	EPSILON :: 0.001
-
-	texture_coord := get_block_texture_coord(block_type)
-
-	// y = 1
-	u_min := f32(texture_coord.top[0]) / ATLAS_WIDTH + EPSILON
-	v_min := f32(texture_coord.top[1]) / ATLAS_WIDTH + EPSILON
-	u_max := f32(texture_coord.top[0] + 1) / ATLAS_WIDTH - EPSILON
-	v_max := f32(texture_coord.top[1] + 1) / ATLAS_WIDTH - EPSILON
-
-	append(&vertices, ..[]f32{0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0})
-	append(&texcoords, ..[]f32{u_min, v_min, u_min, v_max, u_max, v_max, u_max, v_min})
-	append(
-		&colors,
-		..[]u8{255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
-	)
-	append(&indices, ..[]u16{0, 1, 2, 0, 2, 3})
-
-	u_min = f32(texture_coord.side[0]) / ATLAS_WIDTH + EPSILON
-	v_min = f32(texture_coord.side[1]) / ATLAS_WIDTH + EPSILON
-	u_max = f32(texture_coord.side[0] + 1) / ATLAS_WIDTH - EPSILON
-	v_max = f32(texture_coord.side[1] + 1) / ATLAS_WIDTH - EPSILON
-
-	// Z = 0
-	append(&vertices, ..[]f32{0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0})
-	append(&texcoords, ..[]f32{u_max, v_max, u_max, v_min, u_min, v_min, u_min, v_max})
-	append(
-		&colors,
-		..[]u8{204, 204, 204, 255, 204, 204, 204, 255, 204, 204, 204, 255, 204, 204, 204, 255},
-	)
-	append(&indices, ..[]u16{4, 5, 6, 4, 6, 7})
-
-	// Z = 1
-	append(&vertices, ..[]f32{0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1})
-	append(&texcoords, ..[]f32{u_min, v_max, u_max, v_max, u_max, v_min, u_min, v_min})
-	append(
-		&colors,
-		..[]u8{204, 204, 204, 255, 204, 204, 204, 255, 204, 204, 204, 255, 204, 204, 204, 255},
-	)
-	append(&indices, ..[]u16{8, 9, 10, 8, 10, 11})
-
-	// X = 0
-	append(&vertices, ..[]f32{0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0})
-	append(&texcoords, ..[]f32{u_min, v_max, u_max, v_max, u_max, v_min, u_min, v_min})
-	append(
-		&colors,
-		..[]u8{153, 153, 153, 255, 153, 153, 153, 255, 153, 153, 153, 255, 153, 153, 153, 255},
-	)
-	append(&indices, ..[]u16{12, 13, 14, 12, 14, 15})
-
-	// X = 1
-	append(&vertices, ..[]f32{1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1})
-	append(&texcoords, ..[]f32{u_max, v_max, u_max, v_min, u_min, v_min, u_min, v_max})
-	append(
-		&colors,
-		..[]u8{153, 153, 153, 255, 153, 153, 153, 255, 153, 153, 153, 255, 153, 153, 153, 255},
-	)
-	append(&indices, ..[]u16{16, 17, 18, 16, 18, 19})
-
-	// Y = 0
-	u_min = f32(texture_coord.bottom[0]) / ATLAS_WIDTH + EPSILON
-	v_min = f32(texture_coord.bottom[1]) / ATLAS_WIDTH + EPSILON
-	u_max = f32(texture_coord.bottom[0] + 1) / ATLAS_WIDTH - EPSILON
-	v_max = f32(texture_coord.bottom[1] + 1) / ATLAS_WIDTH - EPSILON
-
-	append(&vertices, ..[]f32{0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1})
-	append(&texcoords, ..[]f32{u_min, v_min, u_max, v_min, u_max, v_max, u_min, v_max})
-	append(
-		&colors,
-		..[]u8{102, 102, 102, 255, 102, 102, 102, 255, 102, 102, 102, 255, 102, 102, 102, 255},
-	)
-	append(&indices, ..[]u16{20, 21, 22, 20, 22, 23})
-
-	x := p[0]
-	y := p[1]
-	z := p[2]
-	for i in 0 ..< len(vertices) {
-		if (i % 3 == 0) {
-			vertices[i] += f32(x)
-		} else if (i % 3 == 1) {
-			vertices[i] += f32(y)
-		} else if (i % 3 == 2) {
-			vertices[i] += f32(z)
-		}
-	}
-
-	return Block{BlockType.DIRT, vertices, texcoords, colors, indices, p}
-}
-
-delete_block :: proc(block: ^Block) {
-	delete(block.vertices)
-	delete(block.texcoords)
-	delete(block.colors)
-	delete(block.indices)
-}
 
 delete_chunk :: proc(chunk: ^Chunk) {
 	delete(chunk.vertices)
 	delete(chunk.texcoords)
 	delete(chunk.colors)
 	delete(chunk.indices)
-	for &block in chunk.blocks {
-		delete_block(&block)
-	}
+	delete(chunk.blocks)
 }
 
 main :: proc() {
