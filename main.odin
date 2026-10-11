@@ -12,7 +12,7 @@ import rl "vendor:raylib"
 ATLAS_WIDTH :: 16
 TEXTURE_WIDTH :: 16
 
-RENDER_DISTANCE :: 10
+RENDER_DISTANCE :: 12
 
 BlockType :: enum {
 	GRASS,
@@ -77,7 +77,7 @@ Chunk :: struct {
 	state:     enum {
 		CREATING,
 		POPULATING,
-		FILLING_GEOMETRY,
+		UPLOADING,
 		READY,
 	},
 }
@@ -88,86 +88,24 @@ Chunks :: struct {
 	is_running: bool,
 }
 
+get_grayscale_array :: proc(percent: f32) -> [16]u8 {
+	p := math.clamp(percent, 0.0, 100.0)
+	v := u8(p / 100.0 * 255.0)
+	return [16]u8{v, v, v, 255, v, v, v, 255, v, v, v, 255, v, v, v, 255}
+}
+
 chunk_fill_geometry :: proc(chunk: ^Chunk) {
 	clear(&chunk.vertices)
 	clear(&chunk.texcoords)
 	clear(&chunk.colors)
 	clear(&chunk.indices)
 
-	EPSILON :: 0.0005
+	EPSILON :: 0.005
 
-	COLOR_TOP := []u8 {
-		255,
-		255,
-		255,
-		255,
-		255,
-		255,
-		255,
-		255,
-		255,
-		255,
-		255,
-		255,
-		255,
-		255,
-		255,
-		255,
-	}
-	COLOR_SIDE_Z := []u8 {
-		204,
-		204,
-		204,
-		255,
-		204,
-		204,
-		204,
-		255,
-		204,
-		204,
-		204,
-		255,
-		204,
-		204,
-		204,
-		255,
-	}
-	COLOR_SIDE_X := []u8 {
-		153,
-		153,
-		153,
-		255,
-		153,
-		153,
-		153,
-		255,
-		153,
-		153,
-		153,
-		255,
-		153,
-		153,
-		153,
-		255,
-	}
-	COLOR_BOTTOM := []u8 {
-		102,
-		102,
-		102,
-		255,
-		102,
-		102,
-		102,
-		255,
-		102,
-		102,
-		102,
-		255,
-		102,
-		102,
-		102,
-		255,
-	}
+	COLOR_TOP := get_grayscale_array(100)
+	COLOR_SIDE_Z := get_grayscale_array(80)
+	COLOR_SIDE_X := get_grayscale_array(60)
+	COLOR_BOTTOM := get_grayscale_array(40)
 
 	is_air :: proc(chunk: ^Chunk, pos: [3]i32) -> bool {
 		if pos.x < 0 || pos.x >= CHUNK_WIDTH || pos.z < 0 || pos.z >= CHUNK_WIDTH {
@@ -200,29 +138,26 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					v_min := f32(texture_coord.top[1]) / ATLAS_WIDTH + EPSILON
 					u_max := f32(texture_coord.top[0] + 1) / ATLAS_WIDTH - EPSILON
 					v_max := f32(texture_coord.top[1] + 1) / ATLAS_WIDTH - EPSILON
-
-					append(
-						&chunk.vertices,
-						..[]f32 {
-							x + 0,
-							y + 1,
-							z + 0,
-							x + 0,
-							y + 1,
-							z + 1,
-							x + 1,
-							y + 1,
-							z + 1,
-							x + 1,
-							y + 1,
-							z + 0,
-						},
-					)
+					vertices := []f32 {
+						x + 0,
+						y + 1,
+						z + 0,
+						x + 0,
+						y + 1,
+						z + 1,
+						x + 1,
+						y + 1,
+						z + 1,
+						x + 1,
+						y + 1,
+						z + 0,
+					}
+					append(&chunk.vertices, ..vertices)
 					append(
 						&chunk.texcoords,
 						..[]f32{u_min, v_min, u_min, v_max, u_max, v_max, u_max, v_min},
 					)
-					append(&chunk.colors, ..COLOR_TOP)
+					append(&chunk.colors, ..COLOR_TOP[:])
 					quad_count += 1
 				}
 
@@ -233,28 +168,26 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					u_max := f32(texture_coord.side[0] + 1) / ATLAS_WIDTH - EPSILON
 					v_max := f32(texture_coord.side[1] + 1) / ATLAS_WIDTH - EPSILON
 
-					append(
-						&chunk.vertices,
-						..[]f32 {
-							x + 0,
-							y + 0,
-							z + 0,
-							x + 0,
-							y + 1,
-							z + 0,
-							x + 1,
-							y + 1,
-							z + 0,
-							x + 1,
-							y + 0,
-							z + 0,
-						},
-					)
+					vertices := []f32 {
+						x + 0,
+						y + 0,
+						z + 0,
+						x + 0,
+						y + 1,
+						z + 0,
+						x + 1,
+						y + 1,
+						z + 0,
+						x + 1,
+						y + 0,
+						z + 0,
+					}
+					append(&chunk.vertices, ..vertices)
 					append(
 						&chunk.texcoords,
 						..[]f32{u_max, v_max, u_max, v_min, u_min, v_min, u_min, v_max},
 					)
-					append(&chunk.colors, ..COLOR_SIDE_Z)
+					append(&chunk.colors, ..COLOR_SIDE_Z[:])
 					quad_count += 1
 				}
 
@@ -265,28 +198,26 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					u_max := f32(texture_coord.side[0] + 1) / ATLAS_WIDTH - EPSILON
 					v_max := f32(texture_coord.side[1] + 1) / ATLAS_WIDTH - EPSILON
 
-					append(
-						&chunk.vertices,
-						..[]f32 {
-							x + 0,
-							y + 0,
-							z + 1,
-							x + 1,
-							y + 0,
-							z + 1,
-							x + 1,
-							y + 1,
-							z + 1,
-							x + 0,
-							y + 1,
-							z + 1,
-						},
-					)
+					vertices := []f32 {
+						x + 0,
+						y + 0,
+						z + 1,
+						x + 1,
+						y + 0,
+						z + 1,
+						x + 1,
+						y + 1,
+						z + 1,
+						x + 0,
+						y + 1,
+						z + 1,
+					}
+					append(&chunk.vertices, ..vertices)
 					append(
 						&chunk.texcoords,
 						..[]f32{u_min, v_max, u_max, v_max, u_max, v_min, u_min, v_min},
 					)
-					append(&chunk.colors, ..COLOR_SIDE_Z)
+					append(&chunk.colors, ..COLOR_SIDE_Z[:])
 					quad_count += 1
 				}
 
@@ -297,28 +228,26 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					u_max := f32(texture_coord.side[0] + 1) / ATLAS_WIDTH - EPSILON
 					v_max := f32(texture_coord.side[1] + 1) / ATLAS_WIDTH - EPSILON
 
-					append(
-						&chunk.vertices,
-						..[]f32 {
-							x + 0,
-							y + 0,
-							z + 0,
-							x + 0,
-							y + 0,
-							z + 1,
-							x + 0,
-							y + 1,
-							z + 1,
-							x + 0,
-							y + 1,
-							z + 0,
-						},
-					)
+					vertices := []f32 {
+						x + 0,
+						y + 0,
+						z + 0,
+						x + 0,
+						y + 0,
+						z + 1,
+						x + 0,
+						y + 1,
+						z + 1,
+						x + 0,
+						y + 1,
+						z + 0,
+					}
+					append(&chunk.vertices, ..vertices)
 					append(
 						&chunk.texcoords,
 						..[]f32{u_min, v_max, u_max, v_max, u_max, v_min, u_min, v_min},
 					)
-					append(&chunk.colors, ..COLOR_SIDE_X)
+					append(&chunk.colors, ..COLOR_SIDE_X[:])
 					quad_count += 1
 				}
 
@@ -329,28 +258,26 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					u_max := f32(texture_coord.side[0] + 1) / ATLAS_WIDTH - EPSILON
 					v_max := f32(texture_coord.side[1] + 1) / ATLAS_WIDTH - EPSILON
 
-					append(
-						&chunk.vertices,
-						..[]f32 {
-							x + 1,
-							y + 0,
-							z + 0,
-							x + 1,
-							y + 1,
-							z + 0,
-							x + 1,
-							y + 1,
-							z + 1,
-							x + 1,
-							y + 0,
-							z + 1,
-						},
-					)
+					vertices := []f32 {
+						x + 1,
+						y + 0,
+						z + 0,
+						x + 1,
+						y + 1,
+						z + 0,
+						x + 1,
+						y + 1,
+						z + 1,
+						x + 1,
+						y + 0,
+						z + 1,
+					}
+					append(&chunk.vertices, ..vertices)
 					append(
 						&chunk.texcoords,
 						..[]f32{u_max, v_max, u_max, v_min, u_min, v_min, u_min, v_max},
 					)
-					append(&chunk.colors, ..COLOR_SIDE_X)
+					append(&chunk.colors, ..COLOR_SIDE_X[:])
 					quad_count += 1
 				}
 
@@ -361,28 +288,26 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					u_max := f32(texture_coord.bottom[0] + 1) / ATLAS_WIDTH - EPSILON
 					v_max := f32(texture_coord.bottom[1] + 1) / ATLAS_WIDTH - EPSILON
 
-					append(
-						&chunk.vertices,
-						..[]f32 {
-							x + 0,
-							y + 0,
-							z + 0,
-							x + 1,
-							y + 0,
-							z + 0,
-							x + 1,
-							y + 0,
-							z + 1,
-							x + 0,
-							y + 0,
-							z + 1,
-						},
-					)
+					vertices := []f32 {
+						x + 0,
+						y + 0,
+						z + 0,
+						x + 1,
+						y + 0,
+						z + 0,
+						x + 1,
+						y + 0,
+						z + 1,
+						x + 0,
+						y + 0,
+						z + 1,
+					}
+					append(&chunk.vertices, ..vertices)
 					append(
 						&chunk.texcoords,
 						..[]f32{u_min, v_min, u_max, v_min, u_max, v_max, u_min, v_max},
 					)
-					append(&chunk.colors, ..COLOR_BOTTOM)
+					append(&chunk.colors, ..COLOR_BOTTOM[:])
 					quad_count += 1
 				}
 			}
@@ -427,8 +352,6 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 		chunk.mesh.indices = ([^]u16)(rl.MemAlloc(u32(size)))
 		mem.copy(chunk.mesh.indices, raw_data(chunk.indices), size)
 	}
-
-	rl.UploadMesh(&chunk.mesh, false)
 }
 
 chunk_set_block :: proc(chunk: ^Chunk, p: [3]i32, block_type: BlockType) {
@@ -516,9 +439,8 @@ update_chunks :: proc(p: [2]f32, chunks: ^Chunks) {
 
 			sync.lock(&chunks.mutex)
 			if chunk, ok := &chunks.chunks[chunk_coord]; ok {
-				// Si le thread secondaire a fini le CPU, on upload sur le GPU ici (Main Thread)
-				if chunk.state == .FILLING_GEOMETRY {
-					chunk_fill_geometry(chunk)
+				if chunk.state == .UPLOADING {
+					rl.UploadMesh(&chunk.mesh, false)
 					chunk.state = .READY
 				}
 				sync.unlock(&chunks.mutex)
@@ -526,10 +448,9 @@ update_chunks :: proc(p: [2]f32, chunks: ^Chunks) {
 			}
 			sync.unlock(&chunks.mutex)
 
-			// Le chunk n'existe pas encore, on le crée avec sa position MONDIALE (chunk_coord)
 			sync.lock(&chunks.mutex)
 			chunks.chunks[chunk_coord] = Chunk {
-				p     = chunk_coord, // <-- CORRIGÉ ICI (et non pas x, z relatifs)
+				p     = chunk_coord,
 				state = .CREATING,
 			}
 			sync.unlock(&chunks.mutex)
@@ -541,26 +462,30 @@ RoutineData :: struct {
 	chunks: ^Chunks,
 }
 
+
 update_chunks_routine :: proc(t: ^thread.Thread) {
 	data := (^RoutineData)(t.data).chunks
 	for {
 		time.sleep(5 * time.Millisecond)
-
 		sync.lock(&data.mutex)
-		// On vérifie si le jeu a demandé l'arrêt
 		if !data.is_running {
 			sync.unlock(&data.mutex)
-			break // On sort de la boucle proprement !
+			break
 		}
 
 		for _, &chunk in data.chunks {
 			#partial switch chunk.state {
 			case .CREATING:
+				sync.unlock(&data.mutex)
 				create_chunk(&chunk)
+				sync.lock(&data.mutex)
 				chunk.state = .POPULATING
 			case .POPULATING:
+				sync.unlock(&data.mutex)
 				chunk_populate(&chunk)
-				chunk.state = .FILLING_GEOMETRY
+				chunk_fill_geometry(&chunk)
+				sync.lock(&data.mutex)
+				chunk.state = .UPLOADING
 			}
 		}
 		sync.unlock(&data.mutex)
@@ -601,13 +526,14 @@ main :: proc() {
 
 	up := false
 	down := false
+	horizontal_velocity: f32 = 50.0
 	vertical_velocity: f32 = 10.0
 
 	routine_data := RoutineData {
 		chunks = &chunks,
 	}
 	t := thread.create(update_chunks_routine)
-	t.data = &routine_data // Utilisation correcte de user_data
+	t.data = &routine_data
 	thread.start(t)
 	defer {
 		sync.lock(&chunks.mutex)
@@ -630,18 +556,10 @@ main :: proc() {
 
 		update_chunks({cam.position.x, cam.position.z}, &chunks)
 
-		if rl.IsKeyDown(.SPACE) {
-			up = true
-		}
-		if rl.IsKeyReleased(.SPACE) {
-			up = false
-		}
-		if rl.IsKeyDown(.LEFT_SHIFT) {
-			down = true
-		}
-		if rl.IsKeyReleased(.LEFT_SHIFT) {
-			down = false
-		}
+		if rl.IsKeyDown(.SPACE) do up = true	
+		if rl.IsKeyReleased(.SPACE) do up = false
+		if rl.IsKeyDown(.LEFT_SHIFT) do	down = true
+		if rl.IsKeyReleased(.LEFT_SHIFT) do down = false
 
 		rl.UpdateCamera(&cam, .FIRST_PERSON)
 
@@ -658,7 +576,6 @@ main :: proc() {
 		rl.ClearBackground(rl.SKYBLUE)
 		rl.BeginMode3D(cam)
 
-		// Lecture sécurisée des meshes pour le dessin
 		sync.lock(&chunks.mutex)
 		for _, chunk in chunks.chunks {
 			if chunk.state == .READY {
