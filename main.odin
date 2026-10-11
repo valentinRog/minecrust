@@ -1,16 +1,24 @@
 package main
 
+import "core:fmt"
+import "core:math"
 import "core:math/noise"
+import "core:mem"
+import "core:sync"
+import "core:thread"
+import "core:time"
 import rl "vendor:raylib"
 
 ATLAS_WIDTH :: 16
 TEXTURE_WIDTH :: 16
 
+RENDER_DISTANCE :: 10
 
 BlockType :: enum {
 	GRASS,
 	DIRT,
 	STONE,
+	COBBLE_STONE,
 	AIR,
 }
 
@@ -28,11 +36,35 @@ get_block_texture_coord :: proc(block_type: BlockType) -> BlockTextureCoord {
 		return {top = {2, 0}, side = {2, 0}, bottom = {2, 0}}
 	case .STONE:
 		return {top = {1, 0}, side = {1, 0}, bottom = {1, 0}}
+	case .COBBLE_STONE:
+		return {top = {0, 1}, side = {0, 1}, bottom = {0, 1}}
 	}
 	unreachable()
 }
 
+my_noise :: proc(x, z: f64) -> f64 {
+	octaves := 4
+	persistence := 0.5
+	lacunarity := 2.0
+	base_frequency := 0.008
+	total: f64 = 0.0
+	frequency := base_frequency
+	amplitude: f64 = 1.0
+	max_value: f64 = 0.0
+	for i in 0 ..< octaves {
+		val := noise.noise_2d(50, {x * frequency, z * frequency})
+		total += f64(val) * amplitude
+
+		max_value += amplitude
+		amplitude *= persistence
+		frequency *= lacunarity
+	}
+
+	return total / max_value
+}
+
 CHUNK_WIDTH :: 16
+CHUNK_HEIGHT :: 30
 
 Chunk :: struct {
 	vertices:  [dynamic]f32,
@@ -41,14 +73,21 @@ Chunk :: struct {
 	indices:   [dynamic]u16,
 	p:         [2]i32,
 	blocks:    [dynamic]BlockType,
+	mesh:      rl.Mesh,
+	state:     enum {
+		CREATING,
+		POPULATING,
+		FILLING_GEOMETRY,
+		READY,
+	},
 }
 
-Face :: struct {
-	vertices:   [4 * 3]f32,
-	textcoords: [4 * 3]f32,
-	colors:     [4 * 4]u8,
-	indices:    [2 * 3]i32,
+Chunks :: struct {
+	chunks:     map[[2]i32]Chunk,
+	mutex:      sync.Mutex,
+	is_running: bool,
 }
+
 chunk_fill_geometry :: proc(chunk: ^Chunk) {
 	clear(&chunk.vertices)
 	clear(&chunk.texcoords)
@@ -134,7 +173,7 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 		if pos.x < 0 || pos.x >= CHUNK_WIDTH || pos.z < 0 || pos.z >= CHUNK_WIDTH {
 			return true
 		}
-		if pos.y < 0 || pos.y >= 10 {
+		if pos.y < 0 || pos.y >= CHUNK_HEIGHT {
 			return true
 		}
 
@@ -146,16 +185,16 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 
 	for x in 0 ..< CHUNK_WIDTH {
 		for z in 0 ..< CHUNK_WIDTH {
-			for y in 0 ..< 10 {
+			for y in 0 ..< CHUNK_HEIGHT {
 				block_pos := [3]i32{i32(x), i32(y), i32(z)}
 				block_type := chunk_get_block(chunk, block_pos)
 
 				if block_type == .AIR do continue
 
 				texture_coord := get_block_texture_coord(block_type)
-				fx, fy, fz := f32(x), f32(y), f32(z)
+				x, y, z := f32(x), f32(y), f32(z)
 
-				// --- FACE HAUT (Y + 1) ---
+				// Y = 1
 				if is_air(chunk, {i32(x), i32(y) + 1, i32(z)}) {
 					u_min := f32(texture_coord.top[0]) / ATLAS_WIDTH + EPSILON
 					v_min := f32(texture_coord.top[1]) / ATLAS_WIDTH + EPSILON
@@ -165,18 +204,18 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					append(
 						&chunk.vertices,
 						..[]f32 {
-							fx + 0,
-							fy + 1,
-							fz + 0,
-							fx + 0,
-							fy + 1,
-							fz + 1,
-							fx + 1,
-							fy + 1,
-							fz + 1,
-							fx + 1,
-							fy + 1,
-							fz + 0,
+							x + 0,
+							y + 1,
+							z + 0,
+							x + 0,
+							y + 1,
+							z + 1,
+							x + 1,
+							y + 1,
+							z + 1,
+							x + 1,
+							y + 1,
+							z + 0,
 						},
 					)
 					append(
@@ -187,7 +226,7 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					quad_count += 1
 				}
 
-				// --- FACE NORD (Z - 1) ---
+				// Z = 0
 				if is_air(chunk, {i32(x), i32(y), i32(z) - 1}) {
 					u_min := f32(texture_coord.side[0]) / ATLAS_WIDTH + EPSILON
 					v_min := f32(texture_coord.side[1]) / ATLAS_WIDTH + EPSILON
@@ -197,18 +236,18 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					append(
 						&chunk.vertices,
 						..[]f32 {
-							fx + 0,
-							fy + 0,
-							fz + 0,
-							fx + 0,
-							fy + 1,
-							fz + 0,
-							fx + 1,
-							fy + 1,
-							fz + 0,
-							fx + 1,
-							fy + 0,
-							fz + 0,
+							x + 0,
+							y + 0,
+							z + 0,
+							x + 0,
+							y + 1,
+							z + 0,
+							x + 1,
+							y + 1,
+							z + 0,
+							x + 1,
+							y + 0,
+							z + 0,
 						},
 					)
 					append(
@@ -219,7 +258,7 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					quad_count += 1
 				}
 
-				// --- FACE SUD (Z + 1) ---
+				// Z = 1
 				if is_air(chunk, {i32(x), i32(y), i32(z) + 1}) {
 					u_min := f32(texture_coord.side[0]) / ATLAS_WIDTH + EPSILON
 					v_min := f32(texture_coord.side[1]) / ATLAS_WIDTH + EPSILON
@@ -229,18 +268,18 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					append(
 						&chunk.vertices,
 						..[]f32 {
-							fx + 0,
-							fy + 0,
-							fz + 1,
-							fx + 1,
-							fy + 0,
-							fz + 1,
-							fx + 1,
-							fy + 1,
-							fz + 1,
-							fx + 0,
-							fy + 1,
-							fz + 1,
+							x + 0,
+							y + 0,
+							z + 1,
+							x + 1,
+							y + 0,
+							z + 1,
+							x + 1,
+							y + 1,
+							z + 1,
+							x + 0,
+							y + 1,
+							z + 1,
 						},
 					)
 					append(
@@ -251,7 +290,7 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					quad_count += 1
 				}
 
-				// --- FACE OUEST (X - 1) ---
+				// X = 0
 				if is_air(chunk, {i32(x) - 1, i32(y), i32(z)}) {
 					u_min := f32(texture_coord.side[0]) / ATLAS_WIDTH + EPSILON
 					v_min := f32(texture_coord.side[1]) / ATLAS_WIDTH + EPSILON
@@ -261,18 +300,18 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					append(
 						&chunk.vertices,
 						..[]f32 {
-							fx + 0,
-							fy + 0,
-							fz + 0,
-							fx + 0,
-							fy + 0,
-							fz + 1,
-							fx + 0,
-							fy + 1,
-							fz + 1,
-							fx + 0,
-							fy + 1,
-							fz + 0,
+							x + 0,
+							y + 0,
+							z + 0,
+							x + 0,
+							y + 0,
+							z + 1,
+							x + 0,
+							y + 1,
+							z + 1,
+							x + 0,
+							y + 1,
+							z + 0,
 						},
 					)
 					append(
@@ -283,7 +322,7 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					quad_count += 1
 				}
 
-				// --- FACE EST (X + 1) ---
+				// X = 1
 				if is_air(chunk, {i32(x) + 1, i32(y), i32(z)}) {
 					u_min := f32(texture_coord.side[0]) / ATLAS_WIDTH + EPSILON
 					v_min := f32(texture_coord.side[1]) / ATLAS_WIDTH + EPSILON
@@ -293,18 +332,18 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					append(
 						&chunk.vertices,
 						..[]f32 {
-							fx + 1,
-							fy + 0,
-							fz + 0,
-							fx + 1,
-							fy + 1,
-							fz + 0,
-							fx + 1,
-							fy + 1,
-							fz + 1,
-							fx + 1,
-							fy + 0,
-							fz + 1,
+							x + 1,
+							y + 0,
+							z + 0,
+							x + 1,
+							y + 1,
+							z + 0,
+							x + 1,
+							y + 1,
+							z + 1,
+							x + 1,
+							y + 0,
+							z + 1,
 						},
 					)
 					append(
@@ -315,7 +354,7 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					quad_count += 1
 				}
 
-				// --- FACE BAS (Y - 1) ---
+				// Y = 0
 				if is_air(chunk, {i32(x), i32(y) - 1, i32(z)}) {
 					u_min := f32(texture_coord.bottom[0]) / ATLAS_WIDTH + EPSILON
 					v_min := f32(texture_coord.bottom[1]) / ATLAS_WIDTH + EPSILON
@@ -325,18 +364,18 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 					append(
 						&chunk.vertices,
 						..[]f32 {
-							fx + 0,
-							fy + 0,
-							fz + 0,
-							fx + 1,
-							fy + 0,
-							fz + 0,
-							fx + 1,
-							fy + 0,
-							fz + 1,
-							fx + 0,
-							fy + 0,
-							fz + 1,
+							x + 0,
+							y + 0,
+							z + 0,
+							x + 1,
+							y + 0,
+							z + 0,
+							x + 1,
+							y + 0,
+							z + 1,
+							x + 0,
+							y + 0,
+							z + 1,
 						},
 					)
 					append(
@@ -354,6 +393,42 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 		v := u16(i * 4)
 		append(&chunk.indices, v + 0, v + 1, v + 2, v + 0, v + 2, v + 3)
 	}
+
+	if chunk.mesh.vaoId != 0 {
+		rl.UnloadMesh(chunk.mesh)
+	}
+
+	vertex_count := len(chunk.vertices)
+	texcoord_count := len(chunk.texcoords)
+	color_count := len(chunk.colors)
+	index_count := len(chunk.indices)
+
+	chunk.mesh = {
+		vertexCount   = i32(vertex_count / 3),
+		triangleCount = i32(index_count / 3),
+	}
+	if vertex_count > 0 {
+		size := vertex_count * size_of(f32)
+		chunk.mesh.vertices = ([^]f32)(rl.MemAlloc(u32(size)))
+		mem.copy(chunk.mesh.vertices, raw_data(chunk.vertices), size)
+	}
+	if texcoord_count > 0 {
+		size := texcoord_count * size_of(f32)
+		chunk.mesh.texcoords = ([^]f32)(rl.MemAlloc(u32(size)))
+		mem.copy(chunk.mesh.texcoords, raw_data(chunk.texcoords), size)
+	}
+	if color_count > 0 {
+		size := color_count * size_of(u8)
+		chunk.mesh.colors = ([^]u8)(rl.MemAlloc(u32(size)))
+		mem.copy(chunk.mesh.colors, raw_data(chunk.colors), size)
+	}
+	if index_count > 0 {
+		size := index_count * size_of(u16)
+		chunk.mesh.indices = ([^]u16)(rl.MemAlloc(u32(size)))
+		mem.copy(chunk.mesh.indices, raw_data(chunk.indices), size)
+	}
+
+	rl.UploadMesh(&chunk.mesh, false)
 }
 
 chunk_set_block :: proc(chunk: ^Chunk, p: [3]i32, block_type: BlockType) {
@@ -371,60 +446,125 @@ chunk_get_block :: proc(chunk: ^Chunk, p: [3]i32) -> BlockType {
 	return chunk.blocks[x + CHUNK_WIDTH * z + CHUNK_WIDTH * CHUNK_WIDTH * y]
 }
 
-create_chunk_mesh :: proc(chunk: ^Chunk) -> rl.Mesh {
-	mesh := rl.Mesh {
-		vertexCount   = i32(len(chunk.vertices) / 3),
-		triangleCount = i32(len(chunk.indices) / 3),
-		vertices      = raw_data(chunk.vertices),
-		colors        = raw_data(chunk.colors),
-		texcoords     = raw_data(chunk.texcoords),
-		indices       = raw_data(chunk.indices),
+create_chunk :: proc(chunk: ^Chunk) {
+	chunk.blocks = make([dynamic]BlockType, CHUNK_WIDTH * CHUNK_WIDTH * CHUNK_HEIGHT)
+	for i in 0 ..< len(chunk.blocks) {
+		chunk.blocks[i] = .AIR
 	}
-	rl.UploadMesh(&mesh, false)
-	return mesh
-}
-
-
-create_chunk :: proc(p: [2]i32) -> Chunk {
-	chunk := Chunk {
-		p = p,
-	}
-	for x in 0 ..< CHUNK_WIDTH {
-		for z in 0 ..< CHUNK_WIDTH {
-			for y in 0 ..< 10 {
-				append(&chunk.blocks, BlockType.AIR)
-			}
-		}
-	}
-	return chunk
 }
 
 chunk_populate :: proc(chunk: ^Chunk) {
-	for x in 0 ..< 16 {
-		for z in 0 ..< 16 {
-			frequency := 0.03
+	for x in 0 ..< CHUNK_WIDTH {
+		for z in 0 ..< CHUNK_WIDTH {
+			frequency := 0.015
 			world_x := i32(x) + chunk.p[0] * CHUNK_WIDTH
 			world_z := i32(z) + chunk.p[1] * CHUNK_WIDTH
-			val_2d := noise.noise_2d(50, {f64(world_x) * frequency, f64(world_z) * frequency})
-			y := (val_2d + 1) * 0.5 * 9
-			for y in 0 ..= y {
-				chunk_set_block(
-					chunk,
-					{i32(x), i32(y), i32(z)},
-					.STONE
-				)
+			val_2d := my_noise(f64(world_x), f64(world_z))
+			max_height := i32(f64((val_2d + 1) * 0.5) * f64(CHUNK_HEIGHT - 1))
+			for y in 0 ..= max_height {
+				chunk_set_block(chunk, {i32(x), i32(y), i32(z)}, .GRASS)
 			}
 		}
 	}
 }
 
-
 delete_chunk :: proc(chunk: ^Chunk) {
+	rl.UnloadMesh(chunk.mesh)
 	delete(chunk.vertices)
 	delete(chunk.texcoords)
 	delete(chunk.colors)
 	delete(chunk.indices)
 	delete(chunk.blocks)
+}
+
+update_chunks :: proc(p: [2]f32, chunks: ^Chunks) {
+	player_chunk := [2]i32 {
+		i32(math.floor(p.x / f32(CHUNK_WIDTH))),
+		i32(math.floor(p.y / f32(CHUNK_WIDTH))),
+	}
+
+	to_remove: [dynamic][2]i32
+	defer delete(to_remove)
+
+	distance_chebyshev :: proc(p1: [2]i32, p2: [2]i32) -> i32 {
+		return max(abs(p1.x - p2.x), abs(p1.y - p2.y))
+	}
+
+	sync.lock(&chunks.mutex)
+	for k, _ in chunks.chunks {
+		if distance_chebyshev(k, player_chunk) > RENDER_DISTANCE {
+			append(&to_remove, k)
+		}
+	}
+	sync.unlock(&chunks.mutex)
+
+	if len(to_remove) > 0 {
+		sync.lock(&chunks.mutex)
+		for k in to_remove {
+			if k in chunks.chunks {
+				chunk := &chunks.chunks[k]
+				delete_chunk(chunk)
+				delete_key(&chunks.chunks, k)
+			}
+		}
+		sync.unlock(&chunks.mutex)
+	}
+
+	for x in -RENDER_DISTANCE ..= RENDER_DISTANCE {
+		for z in -RENDER_DISTANCE ..= RENDER_DISTANCE {
+			chunk_coord := [2]i32{player_chunk.x + i32(x), player_chunk.y + i32(z)}
+
+			sync.lock(&chunks.mutex)
+			if chunk, ok := &chunks.chunks[chunk_coord]; ok {
+				// Si le thread secondaire a fini le CPU, on upload sur le GPU ici (Main Thread)
+				if chunk.state == .FILLING_GEOMETRY {
+					chunk_fill_geometry(chunk)
+					chunk.state = .READY
+				}
+				sync.unlock(&chunks.mutex)
+				continue
+			}
+			sync.unlock(&chunks.mutex)
+
+			// Le chunk n'existe pas encore, on le crée avec sa position MONDIALE (chunk_coord)
+			sync.lock(&chunks.mutex)
+			chunks.chunks[chunk_coord] = Chunk {
+				p     = chunk_coord, // <-- CORRIGÉ ICI (et non pas x, z relatifs)
+				state = .CREATING,
+			}
+			sync.unlock(&chunks.mutex)
+		}
+	}
+}
+
+RoutineData :: struct {
+	chunks: ^Chunks,
+}
+
+update_chunks_routine :: proc(t: ^thread.Thread) {
+	data := (^RoutineData)(t.data).chunks
+	for {
+		time.sleep(5 * time.Millisecond)
+
+		sync.lock(&data.mutex)
+		// On vérifie si le jeu a demandé l'arrêt
+		if !data.is_running {
+			sync.unlock(&data.mutex)
+			break // On sort de la boucle proprement !
+		}
+
+		for _, &chunk in data.chunks {
+			#partial switch chunk.state {
+			case .CREATING:
+				create_chunk(&chunk)
+				chunk.state = .POPULATING
+			case .POPULATING:
+				chunk_populate(&chunk)
+				chunk.state = .FILLING_GEOMETRY
+			}
+		}
+		sync.unlock(&data.mutex)
+	}
 }
 
 main :: proc() {
@@ -434,7 +574,7 @@ main :: proc() {
 	rl.DisableCursor()
 
 	cam := rl.Camera3D {
-		position   = {4, 3, 4},
+		position   = {4, 15, 4},
 		target     = {0, 0, 0},
 		up         = {0, 1, 0},
 		fovy       = 45,
@@ -442,41 +582,53 @@ main :: proc() {
 	}
 
 	texture := rl.LoadTexture("assets/atlas.png")
+	defer rl.UnloadTexture(texture)
 	rl.SetTextureFilter(texture, .POINT)
+
 	material := rl.LoadMaterialDefault()
 	material.maps[0].texture = texture
-	chunks: [dynamic]Chunk
-	for x in -5 ..< 5 {
-		for z in -5 ..< 5 {
-			append(&chunks, create_chunk({i32(x), i32(z)}))
-			chunk_populate(&chunks[len(chunks) - 1])
-			chunk_fill_geometry(&chunks[len(chunks) - 1])
-		}
-	}
+
+	chunks: Chunks
+	chunks.is_running = true
 	defer {
-		for &chunk in chunks {
+		sync.lock(&chunks.mutex)
+		for _, &chunk in chunks.chunks {
 			delete_chunk(&chunk)
 		}
+		delete(chunks.chunks)
+		sync.unlock(&chunks.mutex)
 	}
 
 	up := false
 	down := false
+	vertical_velocity: f32 = 10.0
 
-	vertical_velocity: f32 = 5.0
-	meshs: [dynamic]rl.Mesh
-	for &chunk in chunks {
-		append(&meshs, create_chunk_mesh(&chunk))
+	routine_data := RoutineData {
+		chunks = &chunks,
 	}
-
+	t := thread.create(update_chunks_routine)
+	t.data = &routine_data // Utilisation correcte de user_data
+	thread.start(t)
 	defer {
-		for mesh in meshs {
-			rl.UnloadMesh(mesh)
+		sync.lock(&chunks.mutex)
+		chunks.is_running = false
+		sync.unlock(&chunks.mutex)
+
+		thread.join(t)
+		thread.destroy(t)
+
+		sync.lock(&chunks.mutex)
+		for _, &chunk in chunks.chunks {
+			delete_chunk(&chunk)
 		}
+		delete(chunks.chunks)
+		sync.unlock(&chunks.mutex)
 	}
 
 	for !rl.WindowShouldClose() {
-
 		delta := rl.GetFrameTime()
+
+		update_chunks({cam.position.x, cam.position.z}, &chunks)
 
 		if rl.IsKeyDown(.SPACE) {
 			up = true
@@ -490,6 +642,7 @@ main :: proc() {
 		if rl.IsKeyReleased(.LEFT_SHIFT) {
 			down = false
 		}
+
 		rl.UpdateCamera(&cam, .FIRST_PERSON)
 
 		if up {
@@ -501,24 +654,28 @@ main :: proc() {
 			cam.position.y -= vertical_velocity * delta
 		}
 
-
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.SKYBLUE)
 		rl.BeginMode3D(cam)
-		rl.DrawGrid(10, 1)
 
-
-		for i in 0 ..< len(chunks) {
-			chunk_pos := rl.Vector3 {
-				f32(chunks[i].p[0] * i32(CHUNK_WIDTH)),
-				0,
-				f32(chunks[i].p[1] * i32(CHUNK_WIDTH)),
+		// Lecture sécurisée des meshes pour le dessin
+		sync.lock(&chunks.mutex)
+		for _, chunk in chunks.chunks {
+			if chunk.state == .READY {
+				chunk_pos := rl.Vector3 {
+					f32(chunk.p[0] * CHUNK_WIDTH),
+					0,
+					f32(chunk.p[1] * CHUNK_WIDTH),
+				}
+				transform := rl.MatrixTranslate(chunk_pos.x, chunk_pos.y, chunk_pos.z)
+				rl.DrawMesh(chunk.mesh, material, transform)
 			}
-			transform := rl.MatrixTranslate(chunk_pos.x, chunk_pos.y, chunk_pos.z)
-			rl.DrawMesh(meshs[i], material, transform)
 		}
+		sync.unlock(&chunks.mutex)
 
 		rl.EndMode3D()
+		rl.DrawText(fmt.ctprintf("FPS: %d", rl.GetFPS()), 10, 10, 20, rl.WHITE)
+		free_all(context.temp_allocator)
 		rl.EndDrawing()
 	}
 }
