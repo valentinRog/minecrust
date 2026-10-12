@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:math"
 import "core:math/noise"
 import "core:mem"
+import "core:os"
 import "core:sync"
 import "core:thread"
 import "core:time"
@@ -75,6 +76,13 @@ my_noise :: proc(x, z: f64) -> f64 {
 CHUNK_WIDTH :: 16
 CHUNK_HEIGHT :: 30
 
+ChunkState :: enum {
+	CREATING,
+	POPULATING,
+	UPLOADING,
+	READY,
+}
+
 Chunk :: struct {
 	vertices:        [dynamic]f32,
 	texcoords:       [dynamic]f32,
@@ -88,16 +96,12 @@ Chunk :: struct {
 	blocks:          [dynamic]BlockType,
 	mesh:            rl.Mesh,
 	water_mesh:      rl.Mesh,
-	state:           enum {
-		CREATING,
-		POPULATING,
-		UPLOADING,
-		READY,
-	},
+	state:           ChunkState,
+	claimed:         bool,
 }
 
 Chunks :: struct {
-	chunks:     map[[2]i32]Chunk,
+	chunks:     map[[2]i32]^Chunk,
 	mutex:      sync.Mutex,
 	is_running: bool,
 }
@@ -109,6 +113,7 @@ get_grayscale_array :: proc(percent: f32) -> [16]u8 {
 }
 
 build_mesh :: proc(mesh: ^rl.Mesh, verts: []f32, texs: []f32, cols: []u8, idxs: []u16) {
+	rl.UnloadMesh(mesh^)
 	if mesh.vaoId != 0 do rl.UnloadMesh(mesh^)
 	mesh^ = {}
 
@@ -316,21 +321,6 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 		v := u16(i * 4)
 		append(&chunk.water_indices, v + 0, v + 1, v + 2, v + 0, v + 2, v + 3)
 	}
-
-	build_mesh(
-		&chunk.mesh,
-		chunk.vertices[:],
-		chunk.texcoords[:],
-		chunk.colors[:],
-		chunk.indices[:],
-	)
-	build_mesh(
-		&chunk.water_mesh,
-		chunk.water_vertices[:],
-		chunk.water_texcoords[:],
-		chunk.water_colors[:],
-		chunk.water_indices[:],
-	)
 }
 
 chunk_set_block :: proc(chunk: ^Chunk, p: [3]i32, block_type: BlockType) {
@@ -358,7 +348,6 @@ create_chunk :: proc(chunk: ^Chunk) {
 chunk_populate :: proc(chunk: ^Chunk) {
 	for x in 0 ..< CHUNK_WIDTH {
 		for z in 0 ..< CHUNK_WIDTH {
-			frequency := 0.015
 			world_x := i32(x) + chunk.p[0] * CHUNK_WIDTH
 			world_z := i32(z) + chunk.p[1] * CHUNK_WIDTH
 			val_2d := my_noise(f64(world_x), f64(world_z))
@@ -387,6 +376,7 @@ delete_chunk :: proc(chunk: ^Chunk) {
 	delete(chunk.water_colors)
 	delete(chunk.water_indices)
 	delete(chunk.blocks)
+	free(chunk)
 }
 
 update_chunks :: proc(p: [2]f32, chunks: ^Chunks) {
@@ -403,9 +393,11 @@ update_chunks :: proc(p: [2]f32, chunks: ^Chunks) {
 	}
 
 	sync.lock(&chunks.mutex)
-	for k, _ in chunks.chunks {
+	for k, chunk in chunks.chunks {
 		if distance_chebyshev(k, player_chunk) > RENDER_DISTANCE {
-			append(&to_remove, k)
+			if !chunk.claimed {
+				append(&to_remove, k)
+			}
 		}
 	}
 	sync.unlock(&chunks.mutex)
@@ -413,8 +405,8 @@ update_chunks :: proc(p: [2]f32, chunks: ^Chunks) {
 	if len(to_remove) > 0 {
 		sync.lock(&chunks.mutex)
 		for k in to_remove {
-			if k in chunks.chunks {
-				chunk := &chunks.chunks[k]
+			if chunk, ok := chunks.chunks[k]; ok {
+				if chunk.claimed do continue
 				delete_chunk(chunk)
 				delete_key(&chunks.chunks, k)
 			}
@@ -427,22 +419,42 @@ update_chunks :: proc(p: [2]f32, chunks: ^Chunks) {
 			chunk_coord := [2]i32{player_chunk.x + i32(x), player_chunk.y + i32(z)}
 
 			sync.lock(&chunks.mutex)
-			if chunk, ok := &chunks.chunks[chunk_coord]; ok {
-				if chunk.state == .UPLOADING {
+			if chunk, ok := chunks.chunks[chunk_coord]; ok {
+				if chunk.state == .UPLOADING && !chunk.claimed {
+					chunk.claimed = true
+					sync.unlock(&chunks.mutex)
+
+					build_mesh(
+						&chunk.mesh,
+						chunk.vertices[:],
+						chunk.texcoords[:],
+						chunk.colors[:],
+						chunk.indices[:],
+					)
+					build_mesh(
+						&chunk.water_mesh,
+						chunk.water_vertices[:],
+						chunk.water_texcoords[:],
+						chunk.water_colors[:],
+						chunk.water_indices[:],
+					)
 					rl.UploadMesh(&chunk.mesh, false)
 					rl.UploadMesh(&chunk.water_mesh, false)
+
+					sync.lock(&chunks.mutex)
 					chunk.state = .READY
+					chunk.claimed = false
 				}
 				sync.unlock(&chunks.mutex)
 				continue
 			}
-			sync.unlock(&chunks.mutex)
 
-			sync.lock(&chunks.mutex)
-			chunks.chunks[chunk_coord] = Chunk {
+			chunk := new(Chunk)
+			chunk^ = Chunk {
 				p     = chunk_coord,
 				state = .CREATING,
 			}
+			chunks.chunks[chunk_coord] = chunk
 			sync.unlock(&chunks.mutex)
 		}
 	}
@@ -455,33 +467,64 @@ RoutineData :: struct {
 update_chunks_routine :: proc(t: ^thread.Thread) {
 	data := (^RoutineData)(t.data).chunks
 	for {
-		time.sleep(5 * time.Millisecond)
+		time.sleep(1 * time.Millisecond)
+
 		sync.lock(&data.mutex)
 		if !data.is_running {
 			sync.unlock(&data.mutex)
 			break
 		}
 
-		for _, &chunk in data.chunks {
+		target: ^Chunk = nil
+		action: enum {
+			NONE,
+			CREATE,
+			POPULATE,
+		}
+
+		for _, chunk in data.chunks {
 			#partial switch chunk.state {
 			case .CREATING:
-				sync.unlock(&data.mutex)
-				create_chunk(&chunk)
-				sync.lock(&data.mutex)
-				chunk.state = .POPULATING
+				target = chunk
+				action = .CREATE
 			case .POPULATING:
-				sync.unlock(&data.mutex)
-				chunk_populate(&chunk)
-				chunk_fill_geometry(&chunk)
-				sync.lock(&data.mutex)
-				chunk.state = .UPLOADING
+				target = chunk
+				action = .POPULATE
 			}
+			if target != nil do break
 		}
+
+		if target != nil {
+			target.claimed = true
+		}
+		sync.unlock(&data.mutex)
+
+		if target == nil do continue
+
+		switch action {
+		case .CREATE:
+			create_chunk(target)
+		case .POPULATE:
+			chunk_populate(target)
+			chunk_fill_geometry(target)
+		case .NONE:
+		}
+
+		sync.lock(&data.mutex)
+		switch action {
+		case .CREATE:
+			target.state = .POPULATING
+		case .POPULATE:
+			target.state = .UPLOADING
+		case .NONE:
+		}
+		target.claimed = false
 		sync.unlock(&data.mutex)
 	}
 }
 
 main :: proc() {
+	os.set_env("LP_NUM_THREADS", "0")
 	rl.SetConfigFlags({.MSAA_4X_HINT})
 	rl.InitWindow(1600, 900, "minecrust")
 	defer rl.CloseWindow()
@@ -500,14 +543,18 @@ main :: proc() {
 	rl.SetTextureFilter(texture, .POINT)
 
 	material := rl.LoadMaterialDefault()
+	default_texture := material.maps[0].texture
 	material.maps[0].texture = texture
+	defer {
+		material.maps[0].texture = default_texture
+		rl.UnloadMaterial(material)
+	}
 
 	chunks: Chunks
 	chunks.is_running = true
 
 	up := false
 	down := false
-	horizontal_velocity: f32 = 50.0
 	vertical_velocity: f32 = 10.0
 
 	routine_data := RoutineData {
@@ -525,8 +572,8 @@ main :: proc() {
 		thread.destroy(t)
 
 		sync.lock(&chunks.mutex)
-		for _, &chunk in chunks.chunks {
-			delete_chunk(&chunk)
+		for _, chunk in chunks.chunks {
+			delete_chunk(chunk)
 		}
 		delete(chunks.chunks)
 		sync.unlock(&chunks.mutex)
@@ -559,30 +606,28 @@ main :: proc() {
 
 		sync.lock(&chunks.mutex)
 		for _, chunk in chunks.chunks {
-			if chunk.state == .READY {
-				chunk_pos := rl.Vector3 {
-					f32(chunk.p[0] * CHUNK_WIDTH),
-					0,
-					f32(chunk.p[1] * CHUNK_WIDTH),
-				}
-				transform := rl.MatrixTranslate(chunk_pos.x, chunk_pos.y, chunk_pos.z)
-				rl.DrawMesh(chunk.mesh, material, transform)
+			if chunk.state != .READY do continue
+			chunk_pos := rl.Vector3 {
+				f32(chunk.p[0] * CHUNK_WIDTH),
+				0,
+				f32(chunk.p[1] * CHUNK_WIDTH),
 			}
+			transform := rl.MatrixTranslate(chunk_pos.x, chunk_pos.y, chunk_pos.z)
+			rl.DrawMesh(chunk.mesh, material, transform)
 		}
 		sync.unlock(&chunks.mutex)
 
 		rlgl.DisableDepthMask()
 		sync.lock(&chunks.mutex)
 		for _, chunk in chunks.chunks {
-			if chunk.state == .READY {
-				chunk_pos := rl.Vector3 {
-					f32(chunk.p[0] * CHUNK_WIDTH),
-					0,
-					f32(chunk.p[1] * CHUNK_WIDTH),
-				}
-				transform := rl.MatrixTranslate(chunk_pos.x, chunk_pos.y, chunk_pos.z)
-				rl.DrawMesh(chunk.water_mesh, material, transform)
+			if chunk.state != .READY do continue
+			chunk_pos := rl.Vector3 {
+				f32(chunk.p[0] * CHUNK_WIDTH),
+				0,
+				f32(chunk.p[1] * CHUNK_WIDTH),
 			}
+			transform := rl.MatrixTranslate(chunk_pos.x, chunk_pos.y, chunk_pos.z)
+			rl.DrawMesh(chunk.water_mesh, material, transform)
 		}
 		sync.unlock(&chunks.mutex)
 		rlgl.EnableDepthMask()
