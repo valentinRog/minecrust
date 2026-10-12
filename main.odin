@@ -13,13 +13,14 @@ import rlgl "vendor:raylib/rlgl"
 ATLAS_WIDTH :: 16
 TEXTURE_WIDTH :: 16
 
-RENDER_DISTANCE :: 12
+RENDER_DISTANCE :: 16
 
 WATER_LEVEL :: 12
 
 BlockType :: enum {
 	GRASS,
 	DIRT,
+	SAND,
 	STONE,
 	COBBLE_STONE,
 	WATER,
@@ -38,6 +39,8 @@ get_block_texture_coord :: proc(block_type: BlockType) -> BlockTextureCoord {
 		return {top = {0, 0}, side = {3, 0}, bottom = {2, 0}}
 	case .DIRT:
 		return {top = {2, 0}, side = {2, 0}, bottom = {2, 0}}
+	case .SAND:
+		return {top = {0, 11}, side = {0, 11}, bottom = {0, 11}}
 	case .STONE:
 		return {top = {1, 0}, side = {1, 0}, bottom = {1, 0}}
 	case .COBBLE_STONE:
@@ -77,12 +80,10 @@ Chunk :: struct {
 	texcoords:       [dynamic]f32,
 	colors:          [dynamic]u8,
 	indices:         [dynamic]u16,
-
 	water_vertices:  [dynamic]f32,
 	water_texcoords: [dynamic]f32,
 	water_colors:    [dynamic]u8,
 	water_indices:   [dynamic]u16,
-
 	p:               [2]i32,
 	blocks:          [dynamic]BlockType,
 	mesh:            rl.Mesh,
@@ -108,9 +109,7 @@ get_grayscale_array :: proc(percent: f32) -> [16]u8 {
 }
 
 build_mesh :: proc(mesh: ^rl.Mesh, verts: []f32, texs: []f32, cols: []u8, idxs: []u16) {
-	if mesh.vaoId != 0 {
-		rl.UnloadMesh(mesh^)
-	}
+	if mesh.vaoId != 0 do rl.UnloadMesh(mesh^)
 	mesh^ = {}
 
 	vertex_count := len(verts)
@@ -172,9 +171,7 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 			return true
 		}
 		neighbor := chunk_get_block(chunk, npos)
-		if current == .WATER {
-			return neighbor == .AIR
-		}
+		if current == .WATER do return neighbor == .AIR
 		return neighbor == .AIR || neighbor == .WATER
 	}
 
@@ -209,191 +206,102 @@ chunk_fill_geometry :: proc(chunk: ^Chunk) {
 				}
 
 				texture_coord := get_block_texture_coord(block_type)
-				xf, yf, zf := f32(x), f32(y), f32(z)
+				x, y, z := f32(x), f32(y), f32(z)
 
-				// Y = 1 (top)
-				if should_draw_face(chunk, block_type, {i32(x), i32(y) + 1, i32(z)}) {
-					u_min := f32(texture_coord.top[0]) / ATLAS_WIDTH + EPSILON
-					v_min := f32(texture_coord.top[1]) / ATLAS_WIDTH + EPSILON
-					u_max := f32(texture_coord.top[0] + 1) / ATLAS_WIDTH - EPSILON
-					v_max := f32(texture_coord.top[1] + 1) / ATLAS_WIDTH - EPSILON
-					append(
-						vertices,
-						..[]f32 {
-							xf + 0,
-							yf + 1,
-							zf + 0,
-							xf + 0,
-							yf + 1,
-							zf + 1,
-							xf + 1,
-							yf + 1,
-							zf + 1,
-							xf + 1,
-							yf + 1,
-							zf + 0,
-						},
-					)
-					append(
-						texcoords,
-						..[]f32{u_min, v_min, u_min, v_max, u_max, v_max, u_max, v_min},
-					)
-					append(colors, ..COLOR_TOP[:])
-					quad_counter^ += 1
+				Face :: struct {
+					vertices: [4][3]f32,
+					uv:       [4][2]f32,
+					tex:      enum {
+						TOP,
+						SIDE,
+						BOTTOM,
+					},
+					dir:      [3]i32,
 				}
 
-				// Z = 0
-				if should_draw_face(chunk, block_type, {i32(x), i32(y), i32(z) - 1}) && block_type != .WATER {
-					u_min := f32(texture_coord.side[0]) / ATLAS_WIDTH + EPSILON
-					v_min := f32(texture_coord.side[1]) / ATLAS_WIDTH + EPSILON
-					u_max := f32(texture_coord.side[0] + 1) / ATLAS_WIDTH - EPSILON
-					v_max := f32(texture_coord.side[1] + 1) / ATLAS_WIDTH - EPSILON
-					append(
-						vertices,
-						..[]f32 {
-							xf + 0,
-							yf + 0,
-							zf + 0,
-							xf + 0,
-							yf + 1,
-							zf + 0,
-							xf + 1,
-							yf + 1,
-							zf + 0,
-							xf + 1,
-							yf + 0,
-							zf + 0,
-						},
-					)
-					append(
-						texcoords,
-						..[]f32{u_max, v_max, u_max, v_min, u_min, v_min, u_min, v_max},
-					)
-					append(colors, ..COLOR_SIDE_Z[:])
-					quad_counter^ += 1
+				faces := []Face {
+					// Y = 1 (top)
+					{
+						vertices = {{0, 1, 0}, {0, 1, 1}, {1, 1, 1}, {1, 1, 0}},
+						uv = {{0, 0}, {0, 1}, {1, 1}, {1, 0}},
+						tex = .TOP,
+						dir = {0, 1, 0},
+					},
+					// Y = 0 (bottom)
+					{
+						vertices = {{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}},
+						uv = {{0, 0}, {1, 0}, {1, 1}, {0, 1}},
+						tex = .BOTTOM,
+						dir = {0, -1, 0},
+					},
+					// Z = 0
+					{
+						vertices = {{0, 0, 0}, {0, 1, 0}, {1, 1, 0}, {1, 0, 0}},
+						uv = {{1, 1}, {1, 0}, {0, 0}, {0, 1}},
+						tex = .SIDE,
+						dir = {0, 0, -1},
+					},
+					// Z = 1
+					{
+						vertices = {{0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}},
+						uv = {{0, 1}, {1, 1}, {1, 0}, {0, 0}},
+						tex = .SIDE,
+						dir = {0, 0, 1},
+					},
+					// X = 0
+					{
+						vertices = {{0, 0, 0}, {0, 0, 1}, {0, 1, 1}, {0, 1, 0}},
+						uv = {{0, 1}, {1, 1}, {1, 0}, {0, 0}},
+						tex = .SIDE,
+						dir = {-1, 0, 0},
+					},
+					// X = 1
+					{
+						vertices = {{1, 0, 0}, {1, 1, 0}, {1, 1, 1}, {1, 0, 1}},
+						uv = {{1, 1}, {1, 0}, {0, 0}, {0, 1}},
+						tex = .SIDE,
+						dir = {1, 0, 0},
+					},
 				}
 
-				// Z = 1
-				if should_draw_face(chunk, block_type, {i32(x), i32(y), i32(z) + 1}) && block_type != .WATER {
-					u_min := f32(texture_coord.side[0]) / ATLAS_WIDTH + EPSILON
-					v_min := f32(texture_coord.side[1]) / ATLAS_WIDTH + EPSILON
-					u_max := f32(texture_coord.side[0] + 1) / ATLAS_WIDTH - EPSILON
-					v_max := f32(texture_coord.side[1] + 1) / ATLAS_WIDTH - EPSILON
-					append(
-						vertices,
-						..[]f32 {
-							xf + 0,
-							yf + 0,
-							zf + 1,
-							xf + 1,
-							yf + 0,
-							zf + 1,
-							xf + 1,
-							yf + 1,
-							zf + 1,
-							xf + 0,
-							yf + 1,
-							zf + 1,
-						},
-					)
-					append(
-						texcoords,
-						..[]f32{u_min, v_max, u_max, v_max, u_max, v_min, u_min, v_min},
-					)
-					append(colors, ..COLOR_SIDE_Z[:])
-					quad_counter^ += 1
-				}
+				for face in faces {
+					npos := block_pos + face.dir
+					if !should_draw_face(chunk, block_type, npos) do continue
+					tex_coord: [2]i32
+					switch face.tex {
+					case .TOP:
+						tex_coord = texture_coord.top
+					case .SIDE:
+						tex_coord = texture_coord.side
+					case .BOTTOM:
+						tex_coord = texture_coord.bottom
+					}
+					if face.tex != .TOP && block_type == .WATER do continue
+					u_min := f32(tex_coord[0]) / ATLAS_WIDTH + EPSILON
+					v_min := f32(tex_coord[1]) / ATLAS_WIDTH + EPSILON
+					u_max := f32(tex_coord[0] + 1) / ATLAS_WIDTH - EPSILON
+					v_max := f32(tex_coord[1] + 1) / ATLAS_WIDTH - EPSILON
+					for v, i in face.vertices {
+						append(vertices, x + v[0], y + v[1], z + v[2])
+						u := u_min + face.uv[i][0] * (u_max - u_min)
+						w := v_min + face.uv[i][1] * (v_max - v_min)
+						append(texcoords, u, w)
+					}
+					color: [16]u8
+					switch face.tex {
+					case .TOP:
+						color = COLOR_TOP
+					case .BOTTOM:
+						color = COLOR_BOTTOM
+					case .SIDE:
+						if face.dir[0] != 0 {
+							color = COLOR_SIDE_X
+						} else {
+							color = COLOR_SIDE_Z
+						}
+					}
+					append(colors, ..color[:])
 
-				// X = 0
-				if should_draw_face(chunk, block_type, {i32(x) - 1, i32(y), i32(z)})&& block_type != .WATER {
-					u_min := f32(texture_coord.side[0]) / ATLAS_WIDTH + EPSILON
-					v_min := f32(texture_coord.side[1]) / ATLAS_WIDTH + EPSILON
-					u_max := f32(texture_coord.side[0] + 1) / ATLAS_WIDTH - EPSILON
-					v_max := f32(texture_coord.side[1] + 1) / ATLAS_WIDTH - EPSILON
-					append(
-						vertices,
-						..[]f32 {
-							xf + 0,
-							yf + 0,
-							zf + 0,
-							xf + 0,
-							yf + 0,
-							zf + 1,
-							xf + 0,
-							yf + 1,
-							zf + 1,
-							xf + 0,
-							yf + 1,
-							zf + 0,
-						},
-					)
-					append(
-						texcoords,
-						..[]f32{u_min, v_max, u_max, v_max, u_max, v_min, u_min, v_min},
-					)
-					append(colors, ..COLOR_SIDE_X[:])
-					quad_counter^ += 1
-				}
-
-				// X = 1
-				if should_draw_face(chunk, block_type, {i32(x) + 1, i32(y), i32(z)})&& block_type != .WATER{
-					u_min := f32(texture_coord.side[0]) / ATLAS_WIDTH + EPSILON
-					v_min := f32(texture_coord.side[1]) / ATLAS_WIDTH + EPSILON
-					u_max := f32(texture_coord.side[0] + 1) / ATLAS_WIDTH - EPSILON
-					v_max := f32(texture_coord.side[1] + 1) / ATLAS_WIDTH - EPSILON
-					append(
-						vertices,
-						..[]f32 {
-							xf + 1,
-							yf + 0,
-							zf + 0,
-							xf + 1,
-							yf + 1,
-							zf + 0,
-							xf + 1,
-							yf + 1,
-							zf + 1,
-							xf + 1,
-							yf + 0,
-							zf + 1,
-						},
-					)
-					append(
-						texcoords,
-						..[]f32{u_max, v_max, u_max, v_min, u_min, v_min, u_min, v_max},
-					)
-					append(colors, ..COLOR_SIDE_X[:])
-					quad_counter^ += 1
-				}
-
-				// Y = 0 (bottom)
-				if should_draw_face(chunk, block_type, {i32(x), i32(y) - 1, i32(z)}) && block_type != .WATER{
-					u_min := f32(texture_coord.bottom[0]) / ATLAS_WIDTH + EPSILON
-					v_min := f32(texture_coord.bottom[1]) / ATLAS_WIDTH + EPSILON
-					u_max := f32(texture_coord.bottom[0] + 1) / ATLAS_WIDTH - EPSILON
-					v_max := f32(texture_coord.bottom[1] + 1) / ATLAS_WIDTH - EPSILON
-					append(
-						vertices,
-						..[]f32 {
-							xf + 0,
-							yf + 0,
-							zf + 0,
-							xf + 1,
-							yf + 0,
-							zf + 0,
-							xf + 1,
-							yf + 0,
-							zf + 1,
-							xf + 0,
-							yf + 0,
-							zf + 1,
-						},
-					)
-					append(
-						texcoords,
-						..[]f32{u_min, v_min, u_max, v_min, u_max, v_max, u_min, v_max},
-					)
-					append(colors, ..COLOR_BOTTOM[:])
 					quad_counter^ += 1
 				}
 			}
@@ -456,7 +364,9 @@ chunk_populate :: proc(chunk: ^Chunk) {
 			val_2d := my_noise(f64(world_x), f64(world_z))
 			max_height := i32(f64((val_2d + 1) * 0.5) * f64(CHUNK_HEIGHT - 1))
 			for y in 0 ..= max_height {
-				chunk_set_block(chunk, {i32(x), i32(y), i32(z)}, .GRASS)
+				block := BlockType.GRASS
+				if y <= WATER_LEVEL do block = .SAND
+				chunk_set_block(chunk, {i32(x), i32(y), i32(z)}, block)
 			}
 			for y in max_height + 1 ..< WATER_LEVEL {
 				chunk_set_block(chunk, {i32(x), i32(y), i32(z)}, .WATER)
@@ -573,7 +483,7 @@ update_chunks_routine :: proc(t: ^thread.Thread) {
 
 main :: proc() {
 	rl.SetConfigFlags({.MSAA_4X_HINT})
-	rl.InitWindow(1280, 720, "minecrust")
+	rl.InitWindow(1600, 900, "minecrust")
 	defer rl.CloseWindow()
 	rl.DisableCursor()
 
