@@ -114,7 +114,6 @@ get_grayscale_array :: proc(percent: f32) -> [16]u8 {
 
 build_mesh :: proc(mesh: ^rl.Mesh, verts: []f32, texs: []f32, cols: []u8, idxs: []u16) {
 	rl.UnloadMesh(mesh^)
-	if mesh.vaoId != 0 do rl.UnloadMesh(mesh^)
 	mesh^ = {}
 
 	vertex_count := len(verts)
@@ -467,8 +466,6 @@ RoutineData :: struct {
 update_chunks_routine :: proc(t: ^thread.Thread) {
 	data := (^RoutineData)(t.data).chunks
 	for {
-		time.sleep(1 * time.Millisecond)
-
 		sync.lock(&data.mutex)
 		if !data.is_running {
 			sync.unlock(&data.mutex)
@@ -494,12 +491,14 @@ update_chunks_routine :: proc(t: ^thread.Thread) {
 			if target != nil do break
 		}
 
-		if target != nil {
-			target.claimed = true
-		}
+		if target != nil do target.claimed = true
+
 		sync.unlock(&data.mutex)
 
-		if target == nil do continue
+		if target == nil {
+			time.sleep(2 * time.Millisecond)
+			continue
+		}
 
 		switch action {
 		case .CREATE:
